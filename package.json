@@ -1,7 +1,7 @@
 {
   "name": "firebase-rc-mcp",
-  "version": "0.2.0",
-  "description": "MCP server for managing Firebase Remote Config from Claude Code (or any MCP client). Chat-driven CRUD with diff-gated publishes. Auth piggybacks on `firebase login` — no service-account JSON, no GCP console setup.",
+  "version": "0.3.0",
+  "description": "MCP server for managing Firebase Remote Config from Claude Code (or any MCP client). Chat-driven CRUD with diff-gated publishes. Sign in with Google once; no service-account JSON, no GCP console setup.",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -22,7 +22,6 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "firebase-tools": "^13.35.1",
     "google-auth-library": "^9.14.0",
     "zod": "^3.23.8"
   },

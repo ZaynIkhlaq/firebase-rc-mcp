@@ -1,37 +1,30 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import path from 'node:path';
-import { authSummary } from './auth.js';
+import { authSummary, loginInteractive, deleteOurCreds } from './auth.js';
 import { listFirebaseProjects } from './firebase.js';
 
-// Path to the firebase-tools CLI bundled as a dependency of this package.
-function firebaseBinPath(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  // dist/cli.js → dist → package root → node_modules/.bin/firebase
-  return path.resolve(here, '..', 'node_modules', '.bin', 'firebase');
-}
-
-function runFirebase(args: string[]): Promise<number> {
-  return new Promise((resolve) => {
-    const child = spawn(firebaseBinPath(), args, { stdio: 'inherit' });
-    child.on('exit', (code) => resolve(code ?? 1));
-    child.on('error', (err) => {
-      console.error(`Could not run bundled firebase CLI: ${err.message}`);
-      console.error('Fallback: `npx -y firebase-tools ' + args.join(' ') + '`');
-      resolve(1);
-    });
-  });
-}
-
 async function cmdLogin() {
-  const code = await runFirebase(['login']);
-  process.exit(code);
+  const already = authSummary();
+  if (already.signedIn) {
+    console.error(`Already signed in as ${already.email ?? '(unknown email)'}.`);
+    console.error('Run `firebase-rc-mcp logout` first if you want to switch accounts.');
+    return;
+  }
+  try {
+    const { email, credsFile } = await loginInteractive();
+    console.error(`\nSigned in as ${email ?? '(unknown email)'}.`);
+    console.error(`Credentials saved to ${credsFile}.`);
+    console.error('\nNext: register this MCP server with your client. For Claude Code:');
+    console.error('  claude mcp add firebase-rc -- npx -y firebase-rc-mcp');
+  } catch (e) {
+    console.error(`\nLogin failed: ${(e as Error).message}`);
+    process.exit(1);
+  }
 }
 
 async function cmdLogout() {
-  const code = await runFirebase(['logout']);
-  process.exit(code);
+  const removed = deleteOurCreds();
+  if (removed) console.error('Signed out. Credentials removed.');
+  else console.error('No credentials stored by firebase-rc-mcp. (firebase-tools credentials, if any, are left alone.)');
 }
 
 async function cmdStatus() {
@@ -43,14 +36,17 @@ async function cmdStatus() {
   }
   console.error(`Signed in as: ${s.email ?? '(unknown email)'}`);
   console.error(`Credentials:  ${s.credsFile}`);
-  console.error('\nFetching projects your account can see…');
+  console.error('\nProjects your account can see:');
   try {
     const projects = await listFirebaseProjects();
-    console.error(`  ${projects.length} project(s) reachable:`);
-    for (const p of projects.slice(0, 20)) {
-      console.error(`    • ${p.projectId}${p.displayName ? `  (${p.displayName})` : ''}`);
+    if (!projects.length) {
+      console.error('  (none — your account has no Firebase projects visible to it)');
+    } else {
+      for (const p of projects.slice(0, 20)) {
+        console.error(`  - ${p.projectId}${p.displayName ? `  (${p.displayName})` : ''}`);
+      }
+      if (projects.length > 20) console.error(`  ... and ${projects.length - 20} more`);
     }
-    if (projects.length > 20) console.error(`    … and ${projects.length - 20} more`);
   } catch (e) {
     console.error(`  Could not list projects: ${(e as Error).message}`);
     process.exitCode = 1;
@@ -58,19 +54,19 @@ async function cmdStatus() {
 }
 
 function cmdHelp() {
-  console.error(`firebase-rc-mcp — Firebase Remote Config from any MCP client
+  console.error(`firebase-rc-mcp - Firebase Remote Config from any MCP client
 
 Usage:
   firebase-rc-mcp login     Sign in with Google (one-time per machine).
   firebase-rc-mcp logout    Remove stored credentials.
-  firebase-rc-mcp status    Show current account + projects reachable.
-  firebase-rc-mcp           Start the MCP server (stdio) — invoked by Claude Code.
+  firebase-rc-mcp status    Show current account and reachable projects.
+  firebase-rc-mcp           Start the MCP server (stdio) - invoked by your MCP client.
 
 After 'login', register with Claude Code:
   claude mcp add firebase-rc -- npx -y firebase-rc-mcp
 
 You operate on any Firebase project your signed-in Google account has
-Remote Config Admin (or higher) on — no allowlist, no config files.
+Remote Config Admin (or higher) on. No allowlist, no config files.
 `);
 }
 

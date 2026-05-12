@@ -48,7 +48,7 @@ Open a conversation and try: *"What Firebase projects can I see?"*
 
 ## Auth
 
-Piggybacks on `firebase-tools`. `firebase-rc-mcp login` is a passthrough to `firebase login` — same refresh token, same `~/.config/configstore/firebase-tools.json`. If you've already done `firebase login`, skip step 1.
+`firebase-rc-mcp login` runs a browser-based Google sign-in, stores a refresh token at `~/.config/firebase-rc-mcp/auth.json` (mode 0600), and refreshes short-lived access tokens on demand. If you've already done `firebase login` with the `firebase` CLI on this machine, that token is auto-detected and you don't need to log in again.
 
 No service-account JSON. No GCP console setup. No secrets baked into this package.
 
