@@ -61,7 +61,7 @@ function maybeNotSignedIn(e: unknown) {
 const projectArg = z.string().describe('Firebase project ID (e.g. "my-app-prod"). Whatever project the user wants to operate on; their Google account must have Remote Config Admin (or higher) on it.');
 
 export async function startServer(): Promise<void> {
-  const server = new McpServer({ name: 'firebase-rc-mcp', version: '0.3.1' }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: 'firebase-rc-mcp', version: '0.1.0' }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     'rc_auth_status',

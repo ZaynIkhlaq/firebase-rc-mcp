@@ -1,28 +1,24 @@
 # firebase-rc-mcp
 
-Edit Firebase Remote Config from chat. Works with any project your Google account can access.
+Edit Firebase Remote Config from Claude Code. Works with any project your Google account can access.
 
-Pull a key to a local file, edit it (by hand or by asking the model), see a diff, publish. Every publish is gated by a fresh diff token — you can't push without seeing what's about to change first. Versions in Firebase history are attributed to your Google account, not a service account.
+Pull a key to a local file, edit it (by hand or by asking Claude), see a diff, publish. Every publish is gated by a fresh diff token — you can't push without seeing what's about to change first. Versions in Firebase history are attributed to your Google account, not a service account.
 
-## Install (one click)
+## Install
 
-| Client | Install |
-|---|---|
-| **Cursor** | [![Add to Cursor](https://img.shields.io/badge/Add%20to%20Cursor-000?logo=cursor&logoColor=white)](cursor://anysphere.cursor-deeplink/mcp/install?name=firebase-rc&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsImZpcmViYXNlLXJjLW1jcCJdfQ==) |
-| **Claude Code** | `claude mcp add firebase-rc -- npx -y firebase-rc-mcp` |
-| Anything else (Claude Desktop, etc.) | `{"firebase-rc": {"command": "npx", "args": ["-y", "firebase-rc-mcp"]}}` in your `mcpServers` config |
+```bash
+claude mcp add firebase-rc -- npx -y firebase-rc-mcp
+```
 
-That's it. No login command, no terminal step, no Firebase console.
+That's it. Open a conversation and try: *"What Firebase projects can I see?"*
 
-The first time you ask the model to do anything Remote-Config-related, it'll open your browser to a Google sign-in page. Pick the account that has access to your Firebase project. Done.
-
-Try it: *"What Firebase projects can I see?"*
+The first time you ask Claude to do anything Remote-Config-related, it'll open your browser to a Google sign-in page. Pick the account that has access to your Firebase project. Done.
 
 ## Tools
 
 | | |
 |---|---|
-| `rc_login` | Opens the browser for Google sign-in. Auto-called by the model on first use. |
+| `rc_login` | Opens the browser for Google sign-in. Auto-called on first use. |
 | `rc_auth_status` | Signed in? Which account? |
 | `rc_list_projects` | Projects this account can see. |
 | `rc_list_keys` | Keys in a project (type, size). |
@@ -43,13 +39,13 @@ Try it: *"What Firebase projects can I see?"*
 
 ## Auth
 
-The MCP runs Google's standard "OAuth for installed apps" flow — a browser sign-in that redirects to a one-off local port on your machine. The refresh token is stored at `~/.config/firebase-rc-mcp/auth.json` (mode 0600); short-lived access tokens are minted from it on demand. If you've already done `firebase login` with the `firebase` CLI, that token is auto-detected and you skip sign-in entirely.
+Standard Google OAuth for installed apps: browser sign-in redirects to a one-off local port, refresh token stored at `~/.config/firebase-rc-mcp/auth.json` (mode 0600), short-lived access tokens minted on demand. If you've already done `firebase login` with the `firebase` CLI, that token is auto-detected and you skip sign-in entirely.
 
 No service-account JSON. No GCP console setup. No secrets shipped in this package.
 
 ## Per-project hints (optional)
 
-Add `~/firebase-rc/<project>/.semantics.json` to teach the model about invariants in your keys:
+Add `~/firebase-rc/<project>/.semantics.json` to teach Claude about invariants in your keys:
 
 ```json
 {
@@ -62,14 +58,14 @@ Add `~/firebase-rc/<project>/.semantics.json` to teach the model about invariant
 }
 ```
 
-The model reads these automatically on `rc_pull`. Commit it to your repo so the whole team gets the same rules.
+Claude reads these automatically on `rc_pull`. Commit it to your repo so the whole team gets the same rules.
 
 ## Terminal commands (rarely needed)
 
-The MCP handles auth on its own. These exist for debugging / scripting:
+The MCP handles auth on its own. These exist for debugging:
 
 ```
-npx firebase-rc-mcp login     Sign in with Google (also triggered automatically by the MCP).
+npx firebase-rc-mcp login     Sign in with Google (also triggered automatically).
 npx firebase-rc-mcp logout    Remove stored credentials.
 npx firebase-rc-mcp status    Show current account + projects.
 ```
