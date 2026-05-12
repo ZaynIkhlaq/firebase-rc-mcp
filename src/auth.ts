@@ -5,8 +5,8 @@ import { OAuth2Client } from 'google-auth-library';
 import { FIREBASE_CLIENT_ID, FIREBASE_CLIENT_SECRET, SCOPES, runBrowserOAuth } from './oauth.js';
 
 // We accept refresh tokens from two places, in priority order:
-//   1. Our own creds file at ~/.config/firebase-rc-mcp/auth.json (or XDG/AppData equivalent).
-//      Written by `firebase-rc-mcp login`.
+//   1. Our own creds file at ~/.config/firebase-rc/auth.json (or XDG/AppData equivalent).
+//      Written by `firebase-rc login`.
 //   2. firebase-tools' creds file at ~/.config/configstore/firebase-tools.json
 //      (or platform equivalent). Lets users who've already done `firebase login`
 //      skip our login step entirely.
@@ -18,15 +18,15 @@ type FbToolsCreds = { user?: { email?: string }; tokens?: { refresh_token?: stri
 
 function ourCredsPath(): string {
   // Mirror configstore's path conventions so users on any OS end up in a sensible place.
-  if (process.env.FIREBASE_RC_MCP_AUTH_FILE) return process.env.FIREBASE_RC_MCP_AUTH_FILE;
+  if (process.env.FIREBASE_RC_AUTH_FILE) return process.env.FIREBASE_RC_AUTH_FILE;
   const home = os.homedir();
   if (process.platform === 'win32') {
     const base = process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
-    return path.join(base, 'firebase-rc-mcp', 'auth.json');
+    return path.join(base, 'firebase-rc', 'auth.json');
   }
   const xdg = process.env.XDG_CONFIG_HOME;
-  if (xdg) return path.join(xdg, 'firebase-rc-mcp', 'auth.json');
-  return path.join(home, '.config', 'firebase-rc-mcp', 'auth.json');
+  if (xdg) return path.join(xdg, 'firebase-rc', 'auth.json');
+  return path.join(home, '.config', 'firebase-rc', 'auth.json');
 }
 
 function firebaseToolsCredsPaths(): string[] {
@@ -97,7 +97,7 @@ export async function getAccessToken(): Promise<string> {
     cachedClient.setCredentials({ refresh_token: refreshToken });
   }
   const res = await cachedClient.getAccessToken();
-  if (!res.token) throw new Error('Failed to refresh access token. Run `firebase-rc-mcp login` again.');
+  if (!res.token) throw new Error('Failed to refresh access token. Run `firebase-rc login` again.');
   const expiry = (cachedClient.credentials.expiry_date as number | undefined) ?? Date.now() + 55 * 60 * 1000;
   cachedToken = { token: res.token, expiresAt: expiry };
   return res.token;
@@ -105,7 +105,7 @@ export async function getAccessToken(): Promise<string> {
 
 export class NotSignedInError extends Error {
   constructor() {
-    super('Not signed in. Run `npx -y firebase-rc-mcp login` in your terminal and pick the Google account that has access to your Firebase project.');
+    super('Not signed in. Run `npx -y firebase-rc login` in your terminal and pick the Google account that has access to your Firebase project.');
     this.name = 'NotSignedInError';
   }
 }

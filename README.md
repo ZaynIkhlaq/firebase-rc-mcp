@@ -1,4 +1,4 @@
-# firebase-rc-mcp
+# firebase-rc
 
 Edit Firebase Remote Config from Claude Code. Works with any project your Google account can access.
 
@@ -7,7 +7,7 @@ Pull a key to a local file, edit it (by hand or by asking Claude), see a diff, p
 ## Install
 
 ```bash
-claude mcp add firebase-rc -- npx -y firebase-rc-mcp
+claude mcp add firebase-rc -- npx -y firebase-rc
 ```
 
 That's it. Open a conversation and try: *"What Firebase projects can I see?"*
@@ -39,7 +39,7 @@ The first time you ask Claude to do anything Remote-Config-related, it'll open y
 
 ## Auth
 
-Standard Google OAuth for installed apps: browser sign-in redirects to a one-off local port, refresh token stored at `~/.config/firebase-rc-mcp/auth.json` (mode 0600), short-lived access tokens minted on demand. If you've already done `firebase login` with the `firebase` CLI, that token is auto-detected and you skip sign-in entirely.
+Standard Google OAuth for installed apps: browser sign-in redirects to a one-off local port, refresh token stored at `~/.config/firebase-rc/auth.json` (mode 0600), short-lived access tokens minted on demand. If you've already done `firebase login` with the `firebase` CLI, that token is auto-detected and you skip sign-in entirely.
 
 No service-account JSON. No GCP console setup. No secrets shipped in this package.
 
@@ -48,9 +48,9 @@ No service-account JSON. No GCP console setup. No secrets shipped in this packag
 The MCP handles auth on its own. These exist for debugging:
 
 ```
-npx firebase-rc-mcp login     Sign in with Google (also triggered automatically).
-npx firebase-rc-mcp logout    Remove stored credentials.
-npx firebase-rc-mcp status    Show current account + projects.
+npx firebase-rc login     Sign in with Google (also triggered automatically).
+npx firebase-rc logout    Remove stored credentials.
+npx firebase-rc status    Show current account + projects.
 ```
 
 ## Requirements

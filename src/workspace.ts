@@ -4,7 +4,7 @@ import os from 'node:os';
 export const DEFAULT_WORKSPACE = path.join(os.homedir(), 'firebase-rc');
 
 export function workspaceRoot(): string {
-  return process.env.FIREBASE_RC_MCP_WORKSPACE || DEFAULT_WORKSPACE;
+  return process.env.FIREBASE_RC_WORKSPACE || DEFAULT_WORKSPACE;
 }
 
 export function projectDir(project: string): string {

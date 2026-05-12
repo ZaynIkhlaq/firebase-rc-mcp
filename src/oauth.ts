@@ -66,8 +66,8 @@ export async function runBrowserOAuth(): Promise<OAuthResult> {
   const code = await codePromise.finally(() => server.close());
 
   const { tokens } = await oauth.getToken(code);
-  if (!tokens.refresh_token) throw new Error('Google did not return a refresh token. Try `firebase-rc-mcp login` again.');
-  if (!tokens.access_token) throw new Error('Google did not return an access token. Try `firebase-rc-mcp login` again.');
+  if (!tokens.refresh_token) throw new Error('Google did not return a refresh token. Try `firebase-rc login` again.');
+  if (!tokens.access_token) throw new Error('Google did not return an access token. Try `firebase-rc login` again.');
 
   let email: string | undefined;
   let sub: string | undefined;

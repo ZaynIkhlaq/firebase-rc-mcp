@@ -17,7 +17,7 @@ import { issueDiffToken, consumeDiffToken } from './tokens.js';
 import { authSummary, loginInteractive, NotSignedInError } from './auth.js';
 import { writeKeyFile, readKeyFile, writeBackup, listWorkspace } from './workspace.js';
 
-const INSTRUCTIONS = `firebase-rc-mcp gives the user read/write access to Firebase Remote Config on any Firebase project their signed-in Google account has access to.
+const INSTRUCTIONS = `firebase-rc gives the user read/write access to Firebase Remote Config on any Firebase project their signed-in Google account has access to.
 
 This tool works with LOCAL FILES on the user's machine. Editing happens in JSON files in their workspace folder (default: ~/firebase-rc/). You read and edit those files using your normal Read / Edit / Write tools. The MCP only talks to Firebase to pull (download to file), diff (compare file to live), push (upload file), and roll back.
 
@@ -60,7 +60,7 @@ function maybeNotSignedIn(e: unknown) {
 const projectArg = z.string().describe('Firebase project ID (e.g. "my-app-prod"). Whatever project the user wants to operate on; their Google account must have Remote Config Admin (or higher) on it.');
 
 export async function startServer(): Promise<void> {
-  const server = new McpServer({ name: 'firebase-rc-mcp', version: '0.1.0' }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: 'firebase-rc', version: '0.1.0' }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     'rc_auth_status',
@@ -116,7 +116,7 @@ export async function startServer(): Promise<void> {
       const ws = listWorkspace();
       return asJsonContent({
         workspaceRoot: ws.root,
-        envOverride: process.env.FIREBASE_RC_MCP_WORKSPACE ? `FIREBASE_RC_MCP_WORKSPACE=${process.env.FIREBASE_RC_MCP_WORKSPACE}` : undefined,
+        envOverride: process.env.FIREBASE_RC_WORKSPACE ? `FIREBASE_RC_WORKSPACE=${process.env.FIREBASE_RC_WORKSPACE}` : undefined,
         projects: ws.projects,
         note: 'Each project has its own folder. JSON files in that folder are the local working copies. Backups live under .backups/.',
       });
