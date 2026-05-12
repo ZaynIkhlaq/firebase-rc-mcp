@@ -15,14 +15,14 @@ import {
 import { diff, renderDiff, summarizeDiff } from './diff.js';
 import { issueDiffToken, consumeDiffToken } from './tokens.js';
 import { semanticHintFor } from './semantics.js';
-import { authSummary, NotSignedInError } from './auth.js';
+import { authSummary, loginInteractive, NotSignedInError } from './auth.js';
 import { writeKeyFile, readKeyFile, writeBackup, listWorkspace } from './workspace.js';
 
 const INSTRUCTIONS = `firebase-rc-mcp gives the user read/write access to Firebase Remote Config on any Firebase project their signed-in Google account has access to.
 
 This tool works with LOCAL FILES on the user's machine. Editing happens in JSON files in their workspace folder (default: ~/firebase-rc/). You read and edit those files using your normal Read / Edit / Write tools. The MCP only talks to Firebase to pull (download to file), diff (compare file to live), push (upload file), and roll back.
 
-If the user has not signed in yet, calling any tool will fail with a "not signed in" error. Tell them to run \`npx firebase login\` in their terminal once and pick the Google account that has access to the Firebase project they want to manage. Then retry.
+If the user has not signed in yet, calling any tool will fail with a "not signed in" error. When that happens, call rc_login — it opens the user's browser to a Google sign-in page and waits for them to complete the flow. Tell the user "I'm opening your browser to sign in — pick the Google account that has access to your Firebase project," then call rc_login. The tool blocks until sign-in completes (or 5 min timeout). After it returns, retry whatever they originally asked for.
 
 Standard workflow for any change:
 1. rc_pull — downloads the key's current live value into <workspace>/<project>/<key>.json. Returns the file path. If the file already exists and live hasn't changed, this is essentially a no-op (just refreshes metadata).
@@ -52,19 +52,21 @@ function asError(message: string) {
 }
 
 function maybeNotSignedIn(e: unknown) {
-  if (e instanceof NotSignedInError) return asError(e.message);
+  if (e instanceof NotSignedInError) {
+    return asError('Not signed in. Call rc_login — it will open the user\'s browser to sign in with Google.');
+  }
   return null;
 }
 
 const projectArg = z.string().describe('Firebase project ID (e.g. "my-app-prod"). Whatever project the user wants to operate on; their Google account must have Remote Config Admin (or higher) on it.');
 
 export async function startServer(): Promise<void> {
-  const server = new McpServer({ name: 'firebase-rc-mcp', version: '0.2.0' }, { instructions: INSTRUCTIONS });
+  const server = new McpServer({ name: 'firebase-rc-mcp', version: '0.3.1' }, { instructions: INSTRUCTIONS });
 
   server.registerTool(
     'rc_auth_status',
     {
-      description: 'Check whether the user is signed in via firebase-tools and which Google account is active. Call this first if anything fails with "not signed in."',
+      description: 'Check whether the user is signed in. Call this first if anything fails with "not signed in." If signedIn is false, call rc_login.',
       inputSchema: {},
     },
     async () => {
@@ -72,8 +74,7 @@ export async function startServer(): Promise<void> {
       if (!s.signedIn) {
         return asJsonContent({
           signedIn: false,
-          credsFile: s.credsFile,
-          nextStep: 'Run `npx firebase login` in your terminal. Pick the Google account that has access to the Firebase project you want to manage.',
+          nextStep: 'Call rc_login — it will open the user\'s browser to sign in with Google.',
         });
       }
       return asJsonContent({
@@ -82,6 +83,27 @@ export async function startServer(): Promise<void> {
         credsFile: s.credsFile,
         nextStep: 'Call rc_list_projects to see which Firebase projects this account can reach.',
       });
+    }
+  );
+
+  server.registerTool(
+    'rc_login',
+    {
+      description: 'Sign the user in with Google. Opens their browser to a sign-in page and waits for them to complete the flow (up to 5 minutes). If already signed in, returns immediately. Tell the user "I\'m opening your browser to sign in" right before calling this — the call blocks until they finish.',
+      inputSchema: {},
+    },
+    async () => {
+      const existing = authSummary();
+      if (existing.signedIn) return asJsonContent({ alreadySignedIn: true, email: existing.email });
+      try {
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Sign-in timed out after 5 minutes. Tell the user to try again.')), 5 * 60 * 1000)
+        );
+        const { email, credsFile } = await Promise.race([loginInteractive(), timeout]);
+        return asJsonContent({ signedIn: true, email, credsFile, message: `Signed in as ${email ?? 'unknown'}. Now retry whatever the user originally asked for.` });
+      } catch (e) {
+        return asError(`Sign-in failed: ${(e as Error).message}`);
+      }
     }
   );
 

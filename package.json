@@ -1,6 +1,6 @@
 {
   "name": "firebase-rc-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "MCP server for managing Firebase Remote Config from Claude Code (or any MCP client). Chat-driven CRUD with diff-gated publishes. Sign in with Google once; no service-account JSON, no GCP console setup.",
   "license": "MIT",
   "type": "module",
