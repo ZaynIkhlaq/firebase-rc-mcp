@@ -14,7 +14,6 @@ import {
 } from './firebase.js';
 import { diff, renderDiff, summarizeDiff } from './diff.js';
 import { issueDiffToken, consumeDiffToken } from './tokens.js';
-import { semanticHintFor } from './semantics.js';
 import { authSummary, loginInteractive, NotSignedInError } from './auth.js';
 import { writeKeyFile, readKeyFile, writeBackup, listWorkspace } from './workspace.js';
 
@@ -226,7 +225,6 @@ export async function startServer(): Promise<void> {
           templateVersion: template.version?.versionNumber,
           sizeChars: existing.raw?.length ?? (typeof info.parsed === 'string' ? info.parsed.length : JSON.stringify(info.parsed).length),
           pulledAt: new Date().toISOString(),
-          semanticHint: semanticHintFor(project, args.key),
           message: `Saved to ${filePath}. Open it in your editor or ask me to make changes, then say "diff" or "publish".`,
         });
       } catch (e) {

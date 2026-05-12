@@ -43,23 +43,6 @@ Standard Google OAuth for installed apps: browser sign-in redirects to a one-off
 
 No service-account JSON. No GCP console setup. No secrets shipped in this package.
 
-## Per-project hints (optional)
-
-Add `~/firebase-rc/<project>/.semantics.json` to teach Claude about invariants in your keys:
-
-```json
-{
-  "subscription_plans": {
-    "rules": [
-      "Apply changes to monthly, quarterly, and yearly versions together.",
-      "discountPercentage is the only field that legitimately differs by interval."
-    ]
-  }
-}
-```
-
-Claude reads these automatically on `rc_pull`. Commit it to your repo so the whole team gets the same rules.
-
 ## Terminal commands (rarely needed)
 
 The MCP handles auth on its own. These exist for debugging:
