@@ -15,32 +15,50 @@ import {
 import { diff, renderDiff, summarizeDiff } from './diff.js';
 import { issueDiffToken, consumeDiffToken } from './tokens.js';
 import { authSummary, loginInteractive, NotSignedInError } from './auth.js';
-import { writeKeyFile, readKeyFile, writeBackup, listWorkspace } from './workspace.js';
+import { freshEditFile, readEditFileRaw, deleteEditFile, parseByType, sweepStaleTemps } from './tempedit.js';
+import { parseCurl, fireRevalidate, describeRevalidate } from './revalidate.js';
+import {
+  readKnowledge,
+  getProject,
+  setProjectMeta,
+  recordTouch,
+  recordPushHistory,
+  recordCoEdits,
+  addNote,
+  keyContext,
+  summarize,
+  type RevalidateSpec,
+} from './knowledge.js';
 
-const INSTRUCTIONS = `firebase-rc gives the user read/write access to Firebase Remote Config on any Firebase project their signed-in Google account has access to.
+const BASE_INSTRUCTIONS = `firebase-rc gives the user read/write access to Firebase Remote Config on any Firebase project their signed-in Google account has access to.
 
-This tool works with LOCAL FILES on the user's machine. Editing happens in JSON files in their workspace folder (default: ~/firebase-rc/). You read and edit those files using your normal Read / Edit / Write tools. The MCP only talks to Firebase to pull (download to file), diff (compare file to live), push (upload file), and roll back.
+There are NO local copies of config values. Live Firebase is always the source of truth. To edit a key you pull it (which writes the CURRENT live value to a throwaway temp file), edit that temp file, diff it against live, and push. The temp file is deleted on a successful push.
 
-If the user has not signed in yet, calling any tool will fail with a "not signed in" error. When that happens, call rc_login — it opens the user's browser to a Google sign-in page and waits for them to complete the flow. Tell the user "I'm opening your browser to sign in — pick the Google account that has access to your Firebase project," then call rc_login. The tool blocks until sign-in completes (or 5 min timeout). After it returns, retry whatever they originally asked for.
+If the user is brand new (no known context below), run rc_setup — a one-time guided onboarding that signs them in, records the projects they care about (with env + purpose), and optionally captures a post-push cache-invalidation curl. After that, every session starts warm.
 
-Standard workflow for any change:
-1. rc_pull — downloads the key's current live value into <workspace>/<project>/<key>.json. Returns the file path. If the file already exists and live hasn't changed, this is essentially a no-op (just refreshes metadata).
-2. Read the file (use your Read tool — these files can be large, only read the section the user cares about if so).
-3. Either let the user edit the file by hand, OR edit it yourself with your Edit tool based on what the user asked for.
-4. rc_diff — reads the file from disk, compares to live Firebase, returns a structured diff + a short-lived single-use token. SHOW the diff to the user.
-5. After explicit user confirmation ("yes", "publish", "go ahead"), call rc_push — reads the file from disk again, verifies token, publishes.
+If any tool fails with "not signed in," run rc_setup (preferred) or rc_login. Both open the user's browser to a Google sign-in and block until done (up to 5 min). Tell the user "I'm opening your browser to sign in" first, then call it, then retry.
+
+Standard change workflow:
+1. rc_pull(project, key) — writes the current live value to a temp file and returns its path (plus any notes/history we've learned about this key).
+2. Edit that temp file with your normal Read/Edit/Write tools (or let the user edit it).
+3. rc_diff(project, key, editFile) — diffs the temp file against current live, returns a structured diff + a short-lived single-use diffToken. SHOW the diff to the user.
+4. After an explicit "yes" from the user this turn, rc_push(project, key, editFile, diffToken) — publishes, deletes the temp file, and (if a revalidate curl is stored for the project) automatically fires it so the change takes effect.
+
+Learning — keep the user's context sharp over time (this is local-only, never uploaded):
+- When you learn something durable about a key or project that the user couldn't trivially re-derive (what a key controls, a gotcha, env-specific behavior), record it with rc_remember.
+- When you push, pass a short \`why\` so the change is logged with intent.
+- Call rc_context anytime to recall what we know.
 
 Strict rules:
-- The file on disk is the source of truth. Always edit the file, not your own in-memory copy.
-- Never call rc_push without first calling rc_diff in this turn — rc_push will refuse without a fresh token anyway.
+- Never rc_push without a fresh diffToken from rc_diff this turn — it will refuse anyway.
 - Never publish without an explicit yes from the user in this conversation. Past authorizations do not carry forward.
-- For destructive-looking changes (removing fields, bulk rewrites, anything that removes or overwrites large amounts of data), re-confirm with specifics naming the impact.
-- If rc_diff / rc_push return a version-mismatch refusal, pull again, re-apply the edit, then continue.
-- Speak plainly. Don't say "ETag mismatch" — say "Firebase changed since we last looked, let me re-pull."
-- After successful pull, tell the user the file path so they know where to find it if they want to look at it themselves.
+- For destructive-looking changes (removing fields, bulk rewrites), re-confirm with specifics naming the impact.
+- If a tool reports a version mismatch, the live config changed since you looked — pull again, re-apply, re-diff. Say it plainly ("Firebase changed since we last looked, re-pulling"), not "ETag mismatch."`;
 
-If the user has never used this tool before and asks "what can you do," call rc_list_projects to show them the projects their account can reach, then ask which one to start with.
-`;
+function buildInstructions(): string {
+  const summary = summarize();
+  return summary ? `${BASE_INSTRUCTIONS}\n\n${summary}` : BASE_INSTRUCTIONS;
+}
 
 function asJsonContent(value: unknown) {
   return { content: [{ type: 'text' as const, text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] };
@@ -52,53 +70,60 @@ function asError(message: string) {
 
 function maybeNotSignedIn(e: unknown) {
   if (e instanceof NotSignedInError) {
-    return asError('Not signed in. Call rc_login — it will open the user\'s browser to sign in with Google.');
+    return asError('Not signed in. Run rc_setup (preferred — also records your projects) or rc_login to open the browser and sign in with Google.');
   }
   return null;
 }
 
-const projectArg = z.string().describe('Firebase project ID (e.g. "my-app-prod"). Whatever project the user wants to operate on; their Google account must have Remote Config Admin (or higher) on it.');
+async function loginWithTimeout(): Promise<{ email?: string; credsFile: string }> {
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error('Sign-in timed out after 5 minutes. Tell the user to try again.')), 5 * 60 * 1000)
+  );
+  return Promise.race([loginInteractive(), timeout]);
+}
+
+// Tracks which keys were touched this process (session) so rc_push can learn
+// which keys get edited together. In-memory only.
+const sessionTouched = new Map<string, Set<string>>();
+function markTouched(project: string, key: string) {
+  let set = sessionTouched.get(project);
+  if (!set) sessionTouched.set(project, (set = new Set()));
+  set.add(key);
+}
+function otherKeysTouched(project: string, key: string): string[] {
+  return [...(sessionTouched.get(project) ?? [])].filter((k) => k !== key);
+}
+
+const projectArg = z.string().describe('Firebase project ID (e.g. "my-app-prod"). The signed-in Google account must have Remote Config Admin (or higher) on it.');
 
 export async function startServer(): Promise<void> {
-  const server = new McpServer({ name: 'firebase-rc', version: '0.1.0' }, { instructions: INSTRUCTIONS });
+  sweepStaleTemps();
+  const server = new McpServer({ name: 'firebase-rc', version: '0.2.0' }, { instructions: buildInstructions() });
 
   server.registerTool(
     'rc_auth_status',
     {
-      description: 'Check whether the user is signed in. Call this first if anything fails with "not signed in." If signedIn is false, call rc_login.',
+      description: 'Check whether the user is signed in. If signedIn is false, run rc_setup (preferred) or rc_login.',
       inputSchema: {},
     },
     async () => {
       const s = authSummary();
-      if (!s.signedIn) {
-        return asJsonContent({
-          signedIn: false,
-          nextStep: 'Call rc_login — it will open the user\'s browser to sign in with Google.',
-        });
-      }
-      return asJsonContent({
-        signedIn: true,
-        email: s.email,
-        credsFile: s.credsFile,
-        nextStep: 'Call rc_list_projects to see which Firebase projects this account can reach.',
-      });
+      if (!s.signedIn) return asJsonContent({ signedIn: false, nextStep: 'Run rc_setup to sign in and record your projects (or rc_login to just sign in).' });
+      return asJsonContent({ signedIn: true, email: s.email, credsFile: s.credsFile });
     }
   );
 
   server.registerTool(
     'rc_login',
     {
-      description: 'Sign the user in with Google. Opens their browser to a sign-in page and waits for them to complete the flow (up to 5 minutes). If already signed in, returns immediately. Tell the user "I\'m opening your browser to sign in" right before calling this — the call blocks until they finish.',
+      description: 'Sign in with Google. Opens the browser and blocks until done (up to 5 min). Prefer rc_setup for first-time users. Tell the user "I\'m opening your browser to sign in" right before calling this.',
       inputSchema: {},
     },
     async () => {
       const existing = authSummary();
       if (existing.signedIn) return asJsonContent({ alreadySignedIn: true, email: existing.email });
       try {
-        const timeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('Sign-in timed out after 5 minutes. Tell the user to try again.')), 5 * 60 * 1000)
-        );
-        const { email, credsFile } = await Promise.race([loginInteractive(), timeout]);
+        const { email, credsFile } = await loginWithTimeout();
         return asJsonContent({ signedIn: true, email, credsFile, message: `Signed in as ${email ?? 'unknown'}. Now retry whatever the user originally asked for.` });
       } catch (e) {
         return asError(`Sign-in failed: ${(e as Error).message}`);
@@ -107,26 +132,126 @@ export async function startServer(): Promise<void> {
   );
 
   server.registerTool(
-    'rc_workspace_info',
+    'rc_setup',
     {
-      description: 'Show where local Remote Config files live on this machine and what is currently pulled.',
+      description:
+        'One-time guided onboarding. Call with NO arguments first: it signs the user in (opens browser, blocks) and returns the projects their account can reach, with instructions to gather which projects they work with, each project\'s env + one-line purpose, and an optional post-push revalidate curl. Then call it AGAIN with the `projects` array to save everything. Re-run anytime to add/update projects.',
+      inputSchema: {
+        projects: z
+          .array(
+            z.object({
+              projectId: z.string().describe('Firebase project ID.'),
+              env: z.string().optional().describe('Environment label, e.g. "dev", "staging", "prod".'),
+              purpose: z.string().optional().describe('One-line description of what this project is for.'),
+              revalidateCurl: z
+                .string()
+                .optional()
+                .describe('OPTIONAL. The full revalidate curl command the user pastes. Fired automatically after each push to this project. Stored locally (mode 0600).'),
+            })
+          )
+          .optional()
+          .describe('Omit on the first call (discovery). Provide on the second call to persist the gathered setup.'),
+      },
+    },
+    async (args) => {
+      // Phase 1: ensure signed in (login happens here — no separate session needed).
+      if (!authSummary().signedIn) {
+        try {
+          await loginWithTimeout();
+        } catch (e) {
+          return asError(`Sign-in failed: ${(e as Error).message}`);
+        }
+      }
+      const s = authSummary();
+
+      // Phase 2 (no projects yet): discover + guide.
+      if (!args.projects || args.projects.length === 0) {
+        try {
+          const projects = await listFirebaseProjects();
+          return asJsonContent({
+            step: 'collect',
+            signedInAs: s.email,
+            projects: projects.map((p) => ({ projectId: p.projectId, displayName: p.displayName })),
+            instructions:
+              'Ask the user which of these projects they actually work with. For each chosen project get: an env (dev/staging/prod) and a one-line purpose. Then ask if they want automatic cache-invalidation after a push — if yes, have them paste the full revalidate curl for that project (different per env). Finally call rc_setup again with the `projects` array filled in. This only needs doing once.',
+          });
+        } catch (e) {
+          return maybeNotSignedIn(e) ?? asError((e as Error).message);
+        }
+      }
+
+      // Phase 3: persist.
+      const saved: Array<{ projectId: string; env?: string; purpose?: string; revalidate?: string }> = [];
+      for (const p of args.projects) {
+        let revalidate: RevalidateSpec | undefined;
+        if (p.revalidateCurl && p.revalidateCurl.trim()) {
+          try {
+            revalidate = parseCurl(p.revalidateCurl);
+          } catch (e) {
+            return asError(`Couldn't parse the revalidate curl for ${p.projectId}: ${(e as Error).message}`);
+          }
+        }
+        setProjectMeta(p.projectId, { env: p.env, purpose: p.purpose, revalidate });
+        saved.push({ projectId: p.projectId, env: p.env, purpose: p.purpose, revalidate: revalidate ? describeRevalidate(revalidate) : undefined });
+      }
+      return asJsonContent({
+        step: 'done',
+        signedInAs: s.email,
+        saved,
+        message: 'Setup complete. Future sessions start warm — I\'ll already know these projects. Just tell me what to change.',
+      });
+    }
+  );
+
+  server.registerTool(
+    'rc_context',
+    {
+      description: 'Recall everything firebase-rc has learned locally about the user: their projects (env/purpose), frequently-edited keys, notes, and recent change history. Use at the start of work to avoid cold-listing projects/keys. Secrets in revalidate curls are redacted.',
       inputSchema: {},
     },
     async () => {
-      const ws = listWorkspace();
+      const k = readKnowledge();
       return asJsonContent({
-        workspaceRoot: ws.root,
-        envOverride: process.env.FIREBASE_RC_WORKSPACE ? `FIREBASE_RC_WORKSPACE=${process.env.FIREBASE_RC_WORKSPACE}` : undefined,
-        projects: ws.projects,
-        note: 'Each project has its own folder. JSON files in that folder are the local working copies. Backups live under .backups/.',
+        projects: k.projects.map((p) => ({
+          projectId: p.projectId,
+          env: p.env,
+          purpose: p.purpose,
+          revalidate: p.revalidate ? describeRevalidate(p.revalidate) : undefined,
+          keys: Object.fromEntries(
+            Object.entries(p.keys).map(([key, s]) => [
+              key,
+              { touches: s.touches, lastTouchedAt: s.lastTouchedAt, valueType: s.valueType, notes: s.notes, lastChange: s.history[0] },
+            ])
+          ),
+          coEdits: p.coEdits,
+        })),
+        notes: k.notes,
+        updatedAt: k.updatedAt,
       });
+    }
+  );
+
+  server.registerTool(
+    'rc_remember',
+    {
+      description:
+        'Record a durable, local-only note about a key or project — something the user could not trivially re-derive (what a key controls, a gotcha, env-specific behavior). With project+key it attaches to that key; with just project it is a project note; with neither it is a global note. Call this whenever you learn something worth keeping.',
+      inputSchema: {
+        text: z.string().describe('The fact to remember. Keep it concise and durable.'),
+        project: z.string().optional().describe('Project ID this note is about.'),
+        key: z.string().optional().describe('Key this note is about (requires project).'),
+      },
+    },
+    async (args) => {
+      addNote({ projectId: args.project, key: args.key, text: args.text });
+      return asJsonContent({ remembered: true, scope: args.key ? `${args.project}/${args.key}` : args.project ?? 'global' });
     }
   );
 
   server.registerTool(
     'rc_list_projects',
     {
-      description: 'List every Firebase project the signed-in Google account has access to, via the Firebase Management API.',
+      description: 'List every Firebase project the signed-in account can reach. Usually unnecessary once rc_setup has run — prefer rc_context.',
       inputSchema: {},
     },
     async () => {
@@ -135,7 +260,7 @@ export async function startServer(): Promise<void> {
         return asJsonContent({
           count: projects.length,
           projects: projects.map((p) => ({ projectId: p.projectId, displayName: p.displayName, state: p.state })),
-          note: 'These are projects your account can SEE. Whether you can edit Remote Config on a given project also depends on having the Remote Config Admin role.',
+          note: 'These are projects your account can SEE. Editing also requires the Remote Config Admin role.',
         });
       } catch (e) {
         return maybeNotSignedIn(e) ?? asError((e as Error).message);
@@ -146,7 +271,7 @@ export async function startServer(): Promise<void> {
   server.registerTool(
     'rc_list_keys',
     {
-      description: 'List all Remote Config keys (parameter names) in a project, with type and size. Optional `filter` substring.',
+      description: 'List all Remote Config keys in a project, with type and size. Optional `filter` substring.',
       inputSchema: { project: projectArg, filter: z.string().optional().describe('Optional case-insensitive substring filter on key names.') },
     },
     async (args) => {
@@ -177,55 +302,31 @@ export async function startServer(): Promise<void> {
   server.registerTool(
     'rc_pull',
     {
-      description: 'Download the current live value of a Remote Config key to a local JSON file at <workspace>/<project>/<key>.json (default workspace: ~/firebase-rc/). Returns the file path so you (or the user) can open/edit it. If the file already exists locally with unpublished edits, refuses unless overwriteLocal=true.',
-      inputSchema: {
-        project: projectArg,
-        key: z.string().describe('Remote Config parameter key.'),
-        overwriteLocal: z.boolean().optional().describe('If a local file with local edits exists, set true to overwrite. Default false.'),
-      },
+      description:
+        'Fetch the CURRENT live value of a Remote Config key and write it to a throwaway temp file for editing. Returns the temp file path plus any notes/history we have learned about this key. There is no persistent local copy — the file is deleted after a successful push. Always pull fresh right before editing.',
+      inputSchema: { project: projectArg, key: z.string().describe('Remote Config parameter key.') },
     },
     async (args) => {
       try {
         const project = assertProjectIdShape(args.project);
-        const { template, etag } = await getTemplate(project);
+        const { template } = await getTemplate(project);
         const info = extractParamValue(template, args.key);
         if (!info.exists) return asError(`Key "${args.key}" does not exist in project "${project}".`);
 
-        const existing = readKeyFile(project, args.key);
-        if (existing.exists && !args.overwriteLocal) {
-          const localChanges = diff(info.parsed, existing.parsed);
-          if (localChanges.length > 0) {
-            const sameVersion = existing.meta?.pulledTemplateVersion === template.version?.versionNumber;
-            return asError(
-              `Local file at ${existing.filePath} has ${localChanges.length} unpublished edit(s) vs live (live is v${template.version?.versionNumber}, local was pulled from v${existing.meta?.pulledTemplateVersion ?? '?'}). ` +
-              (sameVersion
-                ? `Live hasn't changed since you pulled — your local edits are still valid. To discard them and re-pull, call rc_pull again with overwriteLocal=true.`
-                : `Live has ALSO changed since you pulled. Call rc_pull with overwriteLocal=true to discard local edits, OR push your local edits first via rc_diff + rc_push.`)
-            );
-          }
-        }
+        const editFile = freshEditFile(project, args.key, info.parsed);
+        recordTouch(project, args.key, info.valueType);
+        markTouched(project, args.key);
+        const ctx = keyContext(project, args.key);
 
-        const backup = writeBackup(project, args.key, info.parsed, 'pulled');
-        const { filePath, metaPath } = writeKeyFile(project, args.key, info.parsed, {
-          project,
-          key: args.key,
-          valueType: info.valueType ?? 'JSON',
-          pulledAt: new Date().toISOString(),
-          pulledTemplateVersion: template.version?.versionNumber ?? '',
-          pulledEtag: etag,
-          description: info.description,
-        });
         return asJsonContent({
           project,
           key: args.key,
-          filePath,
-          metaPath,
-          backupPath: backup,
+          editFile,
           valueType: info.valueType,
           templateVersion: template.version?.versionNumber,
-          sizeChars: existing.raw?.length ?? (typeof info.parsed === 'string' ? info.parsed.length : JSON.stringify(info.parsed).length),
-          pulledAt: new Date().toISOString(),
-          message: `Saved to ${filePath}. Open it in your editor or ask me to make changes, then say "diff" or "publish".`,
+          priorNotes: ctx?.notes?.slice(0, 5).map((n) => n.text),
+          lastChange: ctx?.lastChange,
+          message: `Live value written to ${editFile}. Edit that file, then call rc_diff. (Ephemeral — deleted after push, never a persistent copy.)`,
         });
       } catch (e) {
         return maybeNotSignedIn(e) ?? asError((e as Error).message);
@@ -236,36 +337,40 @@ export async function startServer(): Promise<void> {
   server.registerTool(
     'rc_diff',
     {
-      description: 'Compare the LOCAL FILE (<workspace>/<project>/<key>.json) against the current live Remote Config value. Returns a structured diff, a human-readable summary, and a short-lived single-use diffToken (10 min) that rc_push requires. ALWAYS show the diff to the user and get explicit confirmation before calling rc_push. Must rc_pull first if the file does not exist.',
+      description:
+        'Diff the edited temp file against the CURRENT live Remote Config value. Returns a structured diff, a summary, and a short-lived single-use diffToken (10 min) that rc_push requires. ALWAYS show the diff and get an explicit yes before pushing.',
       inputSchema: {
         project: projectArg,
         key: z.string().describe('Remote Config parameter key.'),
+        editFile: z.string().describe('Path to the temp file returned by rc_pull.'),
       },
     },
     async (args) => {
       try {
         const project = assertProjectIdShape(args.project);
-        const local = readKeyFile(project, args.key);
-        if (!local.exists) return asError(`No local file for "${args.key}" in project "${project}". Call rc_pull first.`);
-
+        const raw = readEditFileRaw(args.editFile);
         const { template, etag } = await getTemplate(project);
         const info = extractParamValue(template, args.key);
         if (!info.exists) return asError(`Key "${args.key}" does not exist in project "${project}".`);
 
-        const changes = diff(info.parsed, local.parsed);
-        const liveChanged = local.meta && local.meta.pulledTemplateVersion !== template.version?.versionNumber;
+        const newValue = parseByType(raw, info.valueType);
+        const changes = diff(info.parsed, newValue);
+
+        if (changes.length === 0) {
+          return asJsonContent({ project, key: args.key, changeCount: 0, summary: 'No changes — the edited file matches live. Nothing to push.' });
+        }
 
         const { token, expiresInMs } = issueDiffToken({
           project,
           key: args.key,
-          newValue: local.parsed,
+          newValue,
           expectedEtag: etag,
           expectedTemplateVersion: template.version?.versionNumber ?? '',
         });
         return asJsonContent({
           project,
           key: args.key,
-          filePath: local.filePath,
+          editFile: args.editFile,
           changeCount: changes.length,
           summary: summarizeDiff(changes),
           changes,
@@ -273,11 +378,6 @@ export async function startServer(): Promise<void> {
           diffToken: token,
           diffTokenExpiresInMs: expiresInMs,
           currentLiveVersion: template.version?.versionNumber,
-          localPulledFromVersion: local.meta?.pulledTemplateVersion,
-          liveChangedSincePull: !!liveChanged,
-          liveChangedWarning: liveChanged
-            ? `Live version is now v${template.version?.versionNumber} but local was pulled from v${local.meta?.pulledTemplateVersion}. The diff above is against CURRENT live. Push will be allowed but consider whether someone else's changes need to merge.`
-            : undefined,
         });
       } catch (e) {
         return maybeNotSignedIn(e) ?? asError((e as Error).message);
@@ -288,47 +388,65 @@ export async function startServer(): Promise<void> {
   server.registerTool(
     'rc_push',
     {
-      description: 'Publish the LOCAL FILE to Firebase Remote Config. REQUIRES a fresh diffToken from a recent rc_diff call with the same key. Refuses if no diff was computed, if the file changed since rc_diff (hash mismatch), if the token expired (10 min), or if live Firebase changed since rc_diff. Will NOT publish without explicit confirmation from the user.',
+      description:
+        'Publish the edited temp file to Firebase Remote Config. REQUIRES a fresh diffToken from rc_diff this turn. Refuses if the file changed since rc_diff, the token expired, or live changed since rc_diff. On success: deletes the temp file, logs the change, and (unless skipRevalidate) fires the project\'s stored revalidate curl so the change takes effect. Never publishes without an explicit yes from the user.',
       inputSchema: {
         project: projectArg,
         key: z.string().describe('Remote Config parameter key.'),
+        editFile: z.string().describe('Path to the temp file returned by rc_pull.'),
         diffToken: z.string().describe('Token returned from rc_diff for this key.'),
+        why: z.string().optional().describe('Short reason for this change — logged to the key\'s local history for future context.'),
+        skipRevalidate: z.boolean().optional().describe('Set true to NOT fire the post-push revalidate curl this time.'),
       },
     },
     async (args) => {
       try {
         const project = assertProjectIdShape(args.project);
-        const local = readKeyFile(project, args.key);
-        if (!local.exists) return asError(`No local file for "${args.key}" in project "${project}". Call rc_pull first.`);
-
-        const consume = consumeDiffToken({ token: args.diffToken, project, key: args.key, newValue: local.parsed });
-        if (!consume.ok) return asError(consume.reason);
-
+        const raw = readEditFileRaw(args.editFile);
         const { template, etag } = await getTemplate(project);
-        if (template.version?.versionNumber && consume.entry.expectedTemplateVersion && template.version.versionNumber !== consume.entry.expectedTemplateVersion) {
-          return asError(`Live version is now v${template.version.versionNumber} but rc_diff was computed against v${consume.entry.expectedTemplateVersion}. Someone else published in between. Pull again, re-diff, then push.`);
-        }
         const info = extractParamValue(template, args.key);
         if (!info.exists) return asError(`Key "${args.key}" does not exist in project "${project}".`);
 
-        const prePushBackup = writeBackup(project, args.key, info.parsed, 'pre-push');
+        const newValue = parseByType(raw, info.valueType);
+        const consume = consumeDiffToken({ token: args.diffToken, project, key: args.key, newValue });
+        if (!consume.ok) return asError(consume.reason);
 
-        setParamValue(template, args.key, local.parsed, info.valueType);
+        if (
+          template.version?.versionNumber &&
+          consume.entry.expectedTemplateVersion &&
+          template.version.versionNumber !== consume.entry.expectedTemplateVersion
+        ) {
+          return asError(`Firebase changed since we last looked (live is now v${template.version.versionNumber}, diff was v${consume.entry.expectedTemplateVersion}). Pull again, re-apply, re-diff, then push.`);
+        }
 
-        try { await publishTemplate(project, template, { ifMatch: etag, validateOnly: true }); }
-        catch (e) { return asError(`Firebase rejected the template (validation): ${(e as Error).message}`); }
+        const changeSummary = summarizeDiff(diff(info.parsed, newValue));
+        setParamValue(template, args.key, newValue, info.valueType);
 
+        try {
+          await publishTemplate(project, template, { ifMatch: etag, validateOnly: true });
+        } catch (e) {
+          return asError(`Firebase rejected the template (validation): ${(e as Error).message}`);
+        }
         const published = await publishTemplate(project, template, { ifMatch: etag });
 
-        writeKeyFile(project, args.key, local.parsed, {
-          project,
-          key: args.key,
-          valueType: info.valueType ?? 'JSON',
-          pulledAt: new Date().toISOString(),
-          pulledTemplateVersion: published.version?.versionNumber ?? '',
-          pulledEtag: '',
-          description: info.description,
-        });
+        // Edit is live — drop the temp file and learn from this change.
+        deleteEditFile(args.editFile);
+        const proj = getProject(readKnowledge(), project);
+        recordTouch(project, args.key, info.valueType);
+        recordPushHistory(project, args.key, { env: proj?.env, summary: changeSummary, why: args.why });
+        recordCoEdits(project, args.key, otherKeysTouched(project, args.key));
+
+        // Fire the post-push cache invalidation, if configured.
+        let revalidate: unknown;
+        if (!args.skipRevalidate && proj?.revalidate) {
+          try {
+            revalidate = await fireRevalidate(proj.revalidate);
+          } catch (e) {
+            revalidate = { ok: false, error: (e as Error).message, note: 'Push succeeded but revalidate failed — the config is live but the cache may not be busted yet.' };
+          }
+        } else if (!args.skipRevalidate) {
+          revalidate = { skipped: true, reason: 'No revalidate curl stored for this project. Add one via rc_setup if you want auto-invalidation.' };
+        }
 
         return asJsonContent({
           project,
@@ -336,10 +454,29 @@ export async function startServer(): Promise<void> {
           newVersion: published.version?.versionNumber,
           publishedAt: published.version?.updateTime,
           publishedBy: published.version?.updateUser?.email,
-          prePushBackup,
+          revalidate,
         });
       } catch (e) {
         return maybeNotSignedIn(e) ?? asError((e as Error).message);
+      }
+    }
+  );
+
+  server.registerTool(
+    'rc_revalidate',
+    {
+      description: 'Manually fire the stored post-push cache-invalidation curl for a project (the same one rc_push fires automatically). Useful to re-trigger invalidation without re-publishing.',
+      inputSchema: { project: projectArg },
+    },
+    async (args) => {
+      try {
+        const project = assertProjectIdShape(args.project);
+        const proj = getProject(readKnowledge(), project);
+        if (!proj?.revalidate) return asError(`No revalidate curl stored for "${project}". Add one via rc_setup.`);
+        const result = await fireRevalidate(proj.revalidate);
+        return asJsonContent({ project, ...result });
+      } catch (e) {
+        return asError((e as Error).message);
       }
     }
   );
@@ -364,7 +501,7 @@ export async function startServer(): Promise<void> {
   server.registerTool(
     'rc_rollback',
     {
-      description: 'Roll the entire template back to a previous version. This creates a NEW version with the contents of the target version. Affects ALL keys in the project, not just one. Requires confirmPhrase: "rollback".',
+      description: 'Roll the entire template back to a previous version. Creates a NEW version with that version\'s contents. Affects ALL keys in the project. Requires confirmPhrase: "rollback".',
       inputSchema: {
         project: projectArg,
         versionNumber: z.number().int().min(1).describe('Version number to restore (from rc_list_versions).'),
